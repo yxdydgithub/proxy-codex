@@ -179,7 +179,14 @@ function Get-YamlScalar {
 function Test-TunEnabledInYaml {
     param([string]$Path)
 
-    $lines = Get-Content -LiteralPath $Path
+    try {
+        $lines = Get-Content -LiteralPath $Path -ErrorAction Stop
+    }
+    catch {
+        Write-WarnLine "无法读取 TUN 配置：$Path；$($_.Exception.Message)"
+        return $false
+    }
+
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match "^\s*tun\s*:") {
             for ($j = $i + 1; $j -lt [Math]::Min($i + 12, $lines.Count); $j++) {
@@ -348,7 +355,13 @@ else {
 
     foreach ($config in $configs) {
         Write-Host "配置文件: $config"
-        $text = Get-Content -Raw -LiteralPath $config
+        try {
+            $text = Get-Content -Raw -LiteralPath $config -ErrorAction Stop
+        }
+        catch {
+            Write-WarnLine "无法读取 Clash Verge 配置文件，已跳过：$config；$($_.Exception.Message)"
+            continue
+        }
 
         $mixedPort = Get-YamlScalar -Text $text -Name "mixed-port"
         $vergeMixedPort = Get-YamlScalar -Text $text -Name "verge_mixed_port"
