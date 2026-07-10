@@ -1,6 +1,9 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [string]$ShortcutName = "Codex via Clash Proxy"
+    [string]$ShortcutName = "ChatGPT Codex via Clash Proxy",
+    [ValidateSet("Desktop", "CLI", "Auto")]
+    [string]$LaunchMode = "Desktop",
+    [string]$CodexPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,9 +23,18 @@ if (-not $powershell) {
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $powershell
-$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+$arguments = @(
+    "-NoProfile",
+    "-ExecutionPolicy Bypass",
+    "-File `"$scriptPath`"",
+    "-LaunchMode $LaunchMode"
+)
+if ($CodexPath) {
+    $arguments += "-CodexPath `"$CodexPath`""
+}
+$shortcut.Arguments = $arguments -join " "
 $shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.Description = "Start Codex with Clash Verge proxy only for Codex"
+$shortcut.Description = "Start ChatGPT/Codex with Clash Verge proxy only for this app"
 $shortcut.Save()
 
 Write-Host "已创建快捷方式：$shortcutPath"

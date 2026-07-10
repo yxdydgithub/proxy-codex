@@ -2,8 +2,23 @@
 
 ## 中文说明
 
-让 Codex 在 Windows 上单独使用 Clash Verge / Mihomo 的本地代理 `127.0.0.1:7890`。  
+让 ChatGPT 桌面应用中的 Codex、旧 Codex 桌面应用或 Codex CLI 在 Windows 上单独使用 Clash Verge / Mihomo 的本地代理 `127.0.0.1:7890`。
 本方案不需要开启 Clash Verge 系统代理，不需要 TUN，不需要管理员 PowerShell，也不会影响其它应用。
+
+### 当前版本适配依据
+
+OpenAI 当前说明中，新的 ChatGPT 桌面应用已经整合 Chat、Work 和 Codex；旧 Codex 应用更新后会成为新的 ChatGPT 桌面应用。Windows 上 Codex 可通过 ChatGPT 桌面应用、CLI 或 IDE 扩展使用。因此脚本现在同时支持：
+
+- 新版 ChatGPT 桌面应用：优先自动查找 `ChatGPT.exe`。
+- 旧版 Codex 桌面应用：兼容查找 `Codex.exe`。
+- Codex CLI：使用 `-LaunchMode CLI` 调用 `codex.exe` 或 `codex` 命令。
+
+官方信息源：
+
+- OpenAI Help Center: <https://help.openai.com/en/articles/20001276-moving-to-the-new-chatgpt-desktop-app>
+- ChatGPT desktop app docs: <https://developers.openai.com/codex/app>
+- Codex on Windows docs: <https://developers.openai.com/codex/windows>
+- Codex CLI docs: <https://developers.openai.com/codex/cli>
 
 ### 适用场景
 
@@ -19,7 +34,9 @@
 
 ### 工作原理
 
-`start-codex-with-clash-proxy.ps1` 启动 Codex 时会做两件事：
+`start-codex-with-clash-proxy.ps1` 启动 ChatGPT/Codex 时会按目标类型分流。
+
+桌面应用模式会做两件事：
 
 1. 只给 Codex 子进程注入临时代理环境变量：
 
@@ -30,14 +47,16 @@ ALL_PROXY=http://127.0.0.1:7890
 NO_PROXY=localhost,127.0.0.1,::1
 ```
 
-2. 给 Codex 桌面程序传入 Chromium / Electron 代理参数：
+2. 给 ChatGPT/Codex 桌面程序传入 Chromium / Electron 代理参数：
 
 ```text
 --proxy-server=http://127.0.0.1:7890
 --proxy-bypass-list=localhost;127.0.0.1;::1
 ```
 
-脚本使用 `.NET ProcessStartInfo` 直接给 Codex 子进程注入环境变量，不会修改当前 PowerShell、系统代理、WinHTTP 代理或用户级环境变量。
+CLI 模式不会传入 Chromium / Electron 参数，而是在当前 PowerShell 进程中临时设置上述代理环境变量后运行 `codex`。退出 CLI 后，脚本会恢复本进程原来的代理环境变量。
+
+脚本使用 `.NET ProcessStartInfo` 直接给桌面应用子进程注入环境变量，不会修改当前 PowerShell、系统代理、WinHTTP 代理或用户级环境变量。
 
 ### Clash Verge 前置要求
 
@@ -52,21 +71,21 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 | 文件 | 作用 |
 | --- | --- |
-| `start-codex-with-clash-proxy.ps1` | 启动 Codex，并仅对 Codex 注入代理配置。 |
+| `start-codex-with-clash-proxy.ps1` | 启动 ChatGPT/Codex，并仅对本次进程注入代理配置。 |
 | `clear-user-proxy-env.ps1` | 清理旧方案写入的用户级代理环境变量。 |
 | `create-codex-proxy-shortcut.ps1` | 创建桌面快捷方式，方便一键启动。 |
 | `README.md` | 使用说明。 |
 
 ### 快速开始
 
-先关闭已经打开的 Codex，然后在普通 PowerShell 中运行：
+先关闭已经打开的 ChatGPT/Codex，然后在普通 PowerShell 中运行。默认会启动桌面应用模式，并优先匹配新版 `ChatGPT.exe`：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\start-codex-with-clash-proxy.ps1
 ```
 
-如果 Codex 已经在运行，桌面程序可能复用旧进程并忽略新的代理参数。需要自动重启 Codex 时：
+如果 ChatGPT/Codex 已经在运行，桌面程序可能复用旧进程并忽略新的代理参数。需要自动重启时：
 
 ```powershell
 .\start-codex-with-clash-proxy.ps1 -RestartCodex
@@ -76,6 +95,18 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```powershell
 .\start-codex-with-clash-proxy.ps1 -VerifyOnly
+```
+
+启动 Codex CLI：
+
+```powershell
+.\start-codex-with-clash-proxy.ps1 -LaunchMode CLI
+```
+
+自动检测桌面应用，找不到桌面应用时回退到 CLI：
+
+```powershell
+.\start-codex-with-clash-proxy.ps1 -LaunchMode Auto
 ```
 
 创建桌面快捷方式：
@@ -92,7 +123,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\start-codex-with-clash-proxy.ps1 `
   -HostName 127.0.0.1 `
   -Port 7890 `
-  -CodexPath "C:\Path\To\Codex.exe" `
+  -LaunchMode Desktop `
+  -CodexPath "C:\Path\To\ChatGPT.exe" `
+  -CodexArguments "--some-extra-argument" `
   -RestartCodex `
   -VerifyOnly
 ```
@@ -101,9 +134,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | --- | --- | --- |
 | `-HostName` | `127.0.0.1` | Clash Verge 本地代理地址。 |
 | `-Port` | `7890` | Clash Verge mixed-port。 |
-| `-CodexPath` | 自动检测 | 手动指定 Codex 可执行文件路径。 |
-| `-RestartCodex` | 关闭 | 自动关闭已有 Codex 进程后再启动。 |
-| `-VerifyOnly` | 关闭 | 只检查配置，不启动 Codex。 |
+| `-LaunchMode` | `Desktop` | `Desktop` 启动 ChatGPT/Codex 桌面应用；`CLI` 在当前终端运行 Codex CLI；`Auto` 先找桌面应用，找不到再找 CLI。 |
+| `-CodexPath` | 自动检测 | 手动指定 `ChatGPT.exe`、`Codex.exe` 或 `codex.exe` 路径。 |
+| `-CodexArguments` | 空 | 追加传给目标程序的参数。桌面模式会追加在代理参数后；CLI 模式会直接传给 `codex`。 |
+| `-RestartCodex` | 关闭 | 自动关闭已有 ChatGPT/Codex 进程后再启动。 |
+| `-VerifyOnly` | 关闭 | 只检查配置和可启动目标，不启动 ChatGPT/Codex。 |
 
 #### `clear-user-proxy-env.ps1`
 
@@ -140,6 +175,12 @@ no_proxy
 
 ```powershell
 .\create-codex-proxy-shortcut.ps1 -ShortcutName "Codex via Clash"
+```
+
+创建 CLI 模式快捷方式：
+
+```powershell
+.\create-codex-proxy-shortcut.ps1 -ShortcutName "Codex CLI via Clash" -LaunchMode CLI
 ```
 
 ### 系统代理检测
@@ -182,7 +223,7 @@ Clash Verge 配置检查：
 
 在 Clash Verge 里关闭 TUN 模式。
 
-#### Codex 已经运行
+#### ChatGPT/Codex 已经运行
 
 关闭 Codex 后重新运行脚本，或使用：
 
@@ -190,7 +231,21 @@ Clash Verge 配置检查：
 .\start-codex-with-clash-proxy.ps1 -RestartCodex
 ```
 
-Codex 桌面程序可能复用已有进程，导致新的代理启动参数不生效。
+ChatGPT/Codex 桌面程序可能复用已有进程，导致新的代理启动参数不生效。
+
+#### 找不到桌面应用
+
+运行：
+
+```powershell
+.\start-codex-with-clash-proxy.ps1 -LaunchMode CLI
+```
+
+或者手动指定路径：
+
+```powershell
+.\start-codex-with-clash-proxy.ps1 -CodexPath "C:\Program Files\WindowsApps\...\app\ChatGPT.exe"
+```
 
 #### 代理请求失败
 

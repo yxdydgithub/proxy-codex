@@ -1,8 +1,11 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$HostName = "127.0.0.1",
     [int]$Port = 7890,
     [string]$CodexPath,
+    [ValidateSet("Desktop", "CLI", "Auto")]
+    [string]$LaunchMode = "Desktop",
+    [string[]]$CodexArguments = @(),
     [switch]$VerifyOnly,
     [switch]$RestartCodex
 )
@@ -46,18 +49,18 @@ function Test-PortListening {
 function Get-UserEnvValue {
     param([string]$Name)
 
-    $output = & reg.exe query "HKCU\Environment" /v $Name 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        $value = [Environment]::GetEnvironmentVariable($Name, "User")
+    }
+    catch {
         return $null
     }
 
-    foreach ($line in $output) {
-        if ($line -match "^\s*$([Regex]::Escape($Name))\s+REG_\w+\s+(.+?)\s*$") {
-            return $matches[1]
-        }
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
     }
 
-    return $null
+    return $value
 }
 
 function ConvertTo-WinInetProxyState {
@@ -203,54 +206,187 @@ function Test-TunEnabledInYaml {
     return $false
 }
 
-function Resolve-CodexPath {
-    param([string]$ExplicitPath)
+function Resolve-ExistingFile {
+    param([string]$Path)
 
-    if ($ExplicitPath) {
-        if (Test-Path -LiteralPath $ExplicitPath) {
-            return (Resolve-Path -LiteralPath $ExplicitPath).Path
-        }
-        throw "指定的 CodexPath 不存在：$ExplicitPath"
+    if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path -PathType Leaf -ErrorAction SilentlyContinue)) {
+        return (Resolve-Path -LiteralPath $Path).Path
     }
 
-    $cmd = Get-Command codex -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
-        $source = $cmd.Source
-        $resourcesDir = Split-Path -Parent $source
-        $appDir = Split-Path -Parent $resourcesDir
-        $desktopExe = Join-Path $appDir "Codex.exe"
-        if (Test-Path -LiteralPath $desktopExe) {
-            return $desktopExe
+    return $null
+}
+
+function New-CodexTarget {
+    param(
+        [string]$Path,
+        [string]$Kind,
+        [string]$DisplayName
+    )
+
+    $resolved = Resolve-ExistingFile -Path $Path
+    if (-not $resolved) {
+        throw "可执行文件不存在：$Path"
+    }
+
+    [PSCustomObject]@{
+        Path = $resolved
+        Kind = $Kind
+        DisplayName = $DisplayName
+    }
+}
+
+function Get-OpenAIAppPackageDirs {
+    $dirs = @()
+
+    try {
+        $packages = Get-AppxPackage -ErrorAction Stop |
+            Where-Object {
+                $_.Name -like "OpenAI.ChatGPT*" -or
+                $_.Name -like "OpenAI.Codex*" -or
+                $_.PackageFullName -like "OpenAI.ChatGPT*" -or
+                $_.PackageFullName -like "OpenAI.Codex*"
+            } |
+            Sort-Object Version -Descending
+
+        foreach ($pkg in $packages) {
+            if ($pkg.InstallLocation) {
+                $dirs += $pkg.InstallLocation
+            }
+        }
+    }
+    catch {
+        Write-WarnLine "无法通过 Get-AppxPackage 检查 ChatGPT/Codex 安装包：$($_.Exception.Message)"
+    }
+
+    $windowsApps = "C:\Program Files\WindowsApps"
+    if (Test-Path -LiteralPath $windowsApps -PathType Container -ErrorAction SilentlyContinue) {
+        foreach ($pattern in @("OpenAI.ChatGPT_*", "OpenAI.Codex_*")) {
+            $dirs += Get-ChildItem -LiteralPath $windowsApps -Directory -Filter $pattern -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                ForEach-Object { $_.FullName }
         }
     }
 
-    $packages = Get-ChildItem -LiteralPath "C:\Program Files\WindowsApps" -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "OpenAI.Codex_*" } |
-        Sort-Object LastWriteTime -Descending
+    return $dirs | Where-Object { $_ } | Select-Object -Unique
+}
 
-    foreach ($pkg in $packages) {
-        foreach ($relative in @("app\Codex.exe", "app\resources\codex.exe")) {
-            $candidate = Join-Path $pkg.FullName $relative
-            if (Test-Path -LiteralPath $candidate) {
-                return $candidate
+function Get-CodexDesktopCandidates {
+    $candidates = @()
+
+    foreach ($dir in Get-OpenAIAppPackageDirs) {
+        foreach ($relative in @("app\ChatGPT.exe", "app\Codex.exe")) {
+            $candidates += Join-Path $dir $relative
+        }
+    }
+
+    if ($env:LOCALAPPDATA) {
+        foreach ($root in @(
+                (Join-Path $env:LOCALAPPDATA "Programs\OpenAI\ChatGPT"),
+                (Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex"),
+                (Join-Path $env:LOCALAPPDATA "Programs\ChatGPT"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Codex")
+            )) {
+            foreach ($name in @("ChatGPT.exe", "Codex.exe")) {
+                $candidates += Join-Path $root $name
+                $candidates += Join-Path (Join-Path $root "app") $name
             }
         }
     }
 
-    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
-        return $cmd.Source
+    $cmd = Get-Command codex -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        $binDir = Split-Path -Parent $cmd.Source
+        $appDir = Split-Path -Parent $binDir
+        foreach ($name in @("ChatGPT.exe", "Codex.exe")) {
+            $candidates += Join-Path $appDir $name
+            $candidates += Join-Path (Join-Path $appDir "app") $name
+        }
     }
 
-    throw "未找到 Codex 可执行文件。请用 -CodexPath 指定 Codex.exe。"
+    return $candidates | Where-Object { Resolve-ExistingFile -Path $_ } | Select-Object -Unique
+}
+
+function Get-CodexCliCandidates {
+    $candidates = @()
+
+    $cmd = Get-Command codex -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        $candidates += $cmd.Source
+    }
+
+    foreach ($dir in Get-OpenAIAppPackageDirs) {
+        foreach ($relative in @("app\resources\codex.exe", "app\bin\codex.exe")) {
+            $candidates += Join-Path $dir $relative
+        }
+    }
+
+    if ($env:LOCALAPPDATA) {
+        foreach ($root in @(
+                (Join-Path $env:LOCALAPPDATA "Programs\OpenAI\ChatGPT"),
+                (Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Codex")
+            )) {
+            foreach ($relative in @("bin\codex.exe", "resources\codex.exe", "app\resources\codex.exe", "codex.exe")) {
+                $candidates += Join-Path $root $relative
+            }
+        }
+    }
+
+    return $candidates | Where-Object { Resolve-ExistingFile -Path $_ } | Select-Object -Unique
+}
+
+function Resolve-CodexTarget {
+    param(
+        [string]$ExplicitPath,
+        [string]$Mode
+    )
+
+    if ($ExplicitPath) {
+        $resolved = Resolve-ExistingFile -Path $ExplicitPath
+        if (-not $resolved) {
+            throw "指定的 CodexPath 不存在：$ExplicitPath"
+        }
+
+        $fileName = [IO.Path]::GetFileName($resolved)
+        if ($Mode -eq "CLI" -or ($fileName -ieq "codex.exe" -and $resolved -match "\\(bin|resources)\\codex\.exe$")) {
+            $target = (& "New-CodexTarget" -Path $resolved -Kind "CLI" -DisplayName "Codex CLI")
+            return $target
+        }
+
+        $target = (& "New-CodexTarget" -Path $resolved -Kind "Desktop" -DisplayName "ChatGPT/Codex desktop app")
+        return $target
+    }
+
+    if ($Mode -in @("Desktop", "Auto")) {
+        $desktop = @(Get-CodexDesktopCandidates | Select-Object -First 1)
+        if ($desktop.Count -gt 0) {
+            $desktopPath = $desktop[0]
+            $target = (& "New-CodexTarget" -Path $desktopPath -Kind "Desktop" -DisplayName "ChatGPT/Codex desktop app")
+            return $target
+        }
+
+        if ($Mode -eq "Desktop") {
+            throw "未找到 ChatGPT/Codex 桌面应用。请用 -CodexPath 指定 ChatGPT.exe 或 Codex.exe，或改用 -LaunchMode CLI。"
+        }
+    }
+
+    $cli = @(Get-CodexCliCandidates | Select-Object -First 1)
+    if ($cli.Count -gt 0) {
+        $cliPath = $cli[0]
+        $target = (& "New-CodexTarget" -Path $cliPath -Kind "CLI" -DisplayName "Codex CLI")
+        return $target
+    }
+
+    throw "未找到 ChatGPT/Codex 桌面应用或 codex CLI。请用 -CodexPath 指定 ChatGPT.exe、Codex.exe 或 codex.exe。"
 }
 
 function Stop-ExistingCodex {
-    $processes = @(Get-Process | Where-Object { $_.ProcessName -in @("Codex", "codex") })
+    $processes = @(Get-Process | Where-Object { $_.ProcessName -in @("ChatGPT", "ChatGPT Classic", "Codex", "codex") })
     if ($processes.Count -eq 0) {
         return
     }
 
-    Write-Step "关闭现有 Codex 进程"
+    Write-Step "关闭现有 ChatGPT/Codex 进程"
     foreach ($process in $processes) {
         try {
             Stop-Process -Id $process.Id -Force
@@ -287,6 +423,38 @@ function Start-CodexProcessWithProxy {
     }
 
     [System.Diagnostics.Process]::Start($psi) | Out-Null
+}
+
+function Invoke-CodexCliWithProxy {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$ProxyUrl,
+        [string]$NoProxy
+    )
+
+    $names = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy")
+    $previous = @{}
+    foreach ($name in $names) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+
+    try {
+        foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+            [Environment]::SetEnvironmentVariable($name, $ProxyUrl, "Process")
+        }
+        foreach ($name in @("NO_PROXY", "no_proxy")) {
+            [Environment]::SetEnvironmentVariable($name, $NoProxy, "Process")
+        }
+
+        & $FilePath @Arguments
+        return $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $names) {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
+        }
+    }
 }
 
 $proxyUrl = "http://${HostName}:$Port"
@@ -415,7 +583,10 @@ else {
 
 Write-Step "验证显式代理请求"
 try {
-    $result = & curl.exe -I --max-time 20 -x $proxyUrl "http://www.gstatic.com/generate_204" 2>&1
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $result = & curl.exe --silent --show-error -I --max-time 20 -x $proxyUrl "http://www.gstatic.com/generate_204" 2>&1
+    $ErrorActionPreference = $previousErrorActionPreference
     $joined = $result -join "`n"
     if ($joined -match "204 No Content") {
         Write-Ok "显式使用 $proxyUrl 请求成功，返回 204 No Content"
@@ -426,34 +597,46 @@ try {
     }
 }
 catch {
+    if ($previousErrorActionPreference) {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     Write-WarnLine "curl 验证失败：$($_.Exception.Message)"
 }
 
+Write-Step "解析 ChatGPT/Codex 启动目标"
+$codexTarget = Resolve-CodexTarget -ExplicitPath $CodexPath -Mode $LaunchMode
+Write-Ok "目标类型：$($codexTarget.DisplayName)"
+Write-Ok "目标路径：$($codexTarget.Path)"
+
 if ($VerifyOnly) {
     Write-Step "完成"
-    Write-Host "VerifyOnly 模式不会启动 Codex。"
+    Write-Host "VerifyOnly 模式不会启动 ChatGPT/Codex。"
     exit 0
 }
 
-$runningCodex = @(Get-Process | Where-Object { $_.ProcessName -in @("Codex", "codex") })
+$runningCodex = @(Get-Process | Where-Object { $_.ProcessName -in @("ChatGPT", "ChatGPT Classic", "Codex", "codex") })
 if ($runningCodex.Count -gt 0 -and -not $RestartCodex) {
-    Write-WarnLine "检测到 Codex 已在运行。请先关闭 Codex，或使用 -RestartCodex，避免旧进程忽略新的代理参数。"
+    Write-WarnLine "检测到 ChatGPT/Codex 已在运行。请先关闭应用，或使用 -RestartCodex，避免旧进程忽略新的代理参数。"
     exit 2
 }
 elseif ($RestartCodex) {
     Stop-ExistingCodex
 }
 
-Write-Step "启动 Codex，仅对 Codex 使用代理"
-$resolvedCodexPath = Resolve-CodexPath -ExplicitPath $CodexPath
-$arguments = @(
-    "--proxy-server=$proxyUrl",
-    "--proxy-bypass-list=localhost;127.0.0.1;::1"
-)
+Write-Step "启动 ChatGPT/Codex，仅对本次进程使用代理"
+if ($codexTarget.Kind -eq "Desktop") {
+    $arguments = @(
+        "--proxy-server=$proxyUrl",
+        "--proxy-bypass-list=localhost;127.0.0.1;::1"
+    ) + $CodexArguments
 
-Write-Ok "Codex 路径：$resolvedCodexPath"
-Write-Ok "启动参数：$($arguments -join ' ')"
-
-Start-CodexProcessWithProxy -FilePath $resolvedCodexPath -Arguments $arguments -ProxyUrl $proxyUrl -NoProxy $noProxy
-
-Write-Ok "已启动 Codex。代理只通过启动参数和临时进程环境传递，不写入系统或用户环境。"
+    Write-Ok "启动参数：$($arguments -join ' ')"
+    Start-CodexProcessWithProxy -FilePath $codexTarget.Path -Arguments $arguments -ProxyUrl $proxyUrl -NoProxy $noProxy
+    Write-Ok "已启动 ChatGPT/Codex 桌面应用。代理只通过启动参数和临时进程环境传递，不写入系统或用户环境。"
+}
+else {
+    Write-Ok "CLI 参数：$($CodexArguments -join ' ')"
+    Write-Host "Codex CLI 将在当前 PowerShell 窗口中运行；退出 CLI 后，脚本会恢复本进程代理环境变量。"
+    $exitCode = Invoke-CodexCliWithProxy -FilePath $codexTarget.Path -Arguments $CodexArguments -ProxyUrl $proxyUrl -NoProxy $noProxy
+    exit $exitCode
+}
