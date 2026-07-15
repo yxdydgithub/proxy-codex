@@ -171,6 +171,8 @@ no_proxy
 .\create-codex-proxy-shortcut.ps1
 ```
 
+默认创建的快捷方式会带上 `-RestartCodex`。通过快捷方式启动时，如果检测到 ChatGPT/Codex 已在后台运行，会先关闭旧进程，再重新用代理参数启动。
+
 自定义快捷方式名称：
 
 ```powershell
@@ -181,6 +183,12 @@ no_proxy
 
 ```powershell
 .\create-codex-proxy-shortcut.ps1 -ShortcutName "Codex CLI via Clash" -LaunchMode CLI
+```
+
+如果不希望快捷方式自动重启已有 Codex：
+
+```powershell
+.\create-codex-proxy-shortcut.ps1 -NoRestartCodex
 ```
 
 ### 系统代理检测

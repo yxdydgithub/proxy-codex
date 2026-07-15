@@ -1,9 +1,10 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$ShortcutName = "ChatGPT Codex via Clash Proxy",
     [ValidateSet("Desktop", "CLI", "Auto")]
     [string]$LaunchMode = "Desktop",
-    [string]$CodexPath
+    [string]$CodexPath,
+    [switch]$NoRestartCodex
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,7 @@ if (-not $powershell) {
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $powershell
+
 $arguments = @(
     "-NoProfile",
     "-ExecutionPolicy Bypass",
@@ -32,10 +34,23 @@ $arguments = @(
 if ($CodexPath) {
     $arguments += "-CodexPath `"$CodexPath`""
 }
+if (-not $NoRestartCodex) {
+    $arguments += "-RestartCodex"
+}
+
 $shortcut.Arguments = $arguments -join " "
 $shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.Description = "Start ChatGPT/Codex with Clash Verge proxy only for this app"
+$shortcut.Description = "Start ChatGPT/Codex with Clash Verge proxy; restart existing app by default"
 $shortcut.Save()
 
 Write-Host "已创建快捷方式：$shortcutPath"
-
+Write-Host "启动模式：$LaunchMode"
+if ($CodexPath) {
+    Write-Host "Codex 路径：$CodexPath"
+}
+if ($NoRestartCodex) {
+    Write-Host "快捷方式不会自动重启已有 ChatGPT/Codex。"
+}
+else {
+    Write-Host "快捷方式已启用 -RestartCodex：若 ChatGPT/Codex 已在运行，会先关闭再重新启动。"
+}

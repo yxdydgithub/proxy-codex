@@ -171,6 +171,8 @@ Create a desktop shortcut:
 .\create-codex-proxy-shortcut.ps1
 ```
 
+The shortcut includes `-RestartCodex` by default. When launched, it closes any existing ChatGPT/Codex process first, then starts it again with the proxy arguments.
+
 Customize the shortcut name:
 
 ```powershell
@@ -181,6 +183,12 @@ Create a CLI-mode shortcut:
 
 ```powershell
 .\create-codex-proxy-shortcut.ps1 -ShortcutName "Codex CLI via Clash" -LaunchMode CLI
+```
+
+If you do not want the shortcut to restart an existing Codex process:
+
+```powershell
+.\create-codex-proxy-shortcut.ps1 -NoRestartCodex
 ```
 
 ### System Proxy Detection
