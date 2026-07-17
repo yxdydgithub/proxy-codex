@@ -257,9 +257,9 @@ Or manually specify the executable:
 
 #### `ChatGPT.exe` under WindowsApps fails with `Access is denied`
 
-Newer Codex/ChatGPT builds may be installed under `C:\Program Files\WindowsApps`. The desktop entry there may reject direct process startup from the script. The script first tries direct startup with injected environment variables; if it hits `Access is denied`, it automatically falls back to ShellExecute-compatible startup while keeping the `--proxy-server=http://127.0.0.1:7890` launch argument.
+Newer Codex/ChatGPT builds may be installed under `C:\Program Files\WindowsApps`. The MSIX package can reject direct execution of its packaged `ChatGPT.exe`, and ShellExecute may fail with the same `Access is denied` error.
 
-In fallback mode, environment variables cannot be injected, but the desktop app still receives the proxy launch argument.
+The script now resolves the application activation ID from `AppxManifest.xml` and launches it through the Windows application activation API while passing `--proxy-server=http://127.0.0.1:7890`. This path does not require administrator rights, enable the system proxy, or write system/user environment variables. Direct process startup with temporary process environment variables is retained for non-MSIX desktop installations only.
 
 #### Proxy request failed
 

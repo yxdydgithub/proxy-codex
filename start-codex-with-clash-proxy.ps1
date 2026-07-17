@@ -398,6 +398,163 @@ function Stop-ExistingCodex {
     }
 }
 
+function Get-AppUserModelIdForExecutable {
+    param([string]$FilePath)
+
+    $resolvedPath = [IO.Path]::GetFullPath($FilePath)
+
+    try {
+        foreach ($pkg in Get-AppxPackage -ErrorAction Stop) {
+            if (-not $pkg.InstallLocation -or -not $pkg.PackageFamilyName) {
+                continue
+            }
+
+            $installLocation = [IO.Path]::GetFullPath([string]$pkg.InstallLocation).TrimEnd("\")
+            if (-not $resolvedPath.StartsWith("$installLocation\", [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
+            $manifestPath = Join-Path $installLocation "AppxManifest.xml"
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                continue
+            }
+
+            [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
+            $relativeExecutable = $resolvedPath.Substring($installLocation.Length).TrimStart("\")
+            $applications = $manifest.SelectNodes("/*[local-name()='Package']/*[local-name()='Applications']/*[local-name()='Application']")
+
+            foreach ($application in $applications) {
+                $manifestExecutable = ([string]$application.Executable).Replace("/", "\").TrimStart("\")
+                if ($manifestExecutable -ieq $relativeExecutable -and $application.Id) {
+                    return "$($pkg.PackageFamilyName)!$($application.Id)"
+                }
+            }
+        }
+    }
+    catch {
+        Write-WarnLine "无法解析 Windows 应用激活 ID：$($_.Exception.Message)"
+    }
+
+    return $null
+}
+
+function ConvertTo-WindowsCommandLineArgument {
+    param([AllowEmptyString()][string]$Argument)
+
+    if ($null -eq $Argument -or $Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashCount = 0
+
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (($backslashCount * 2) + 1)))
+            [void]$builder.Append('"')
+            $backslashCount = 0
+            continue
+        }
+
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+        [void]$builder.Append($character)
+    }
+
+    if ($backslashCount -gt 0) {
+        [void]$builder.Append(('\' * ($backslashCount * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Start-PackagedDesktopApp {
+    param(
+        [string]$AppUserModelId,
+        [string[]]$Arguments
+    )
+
+    if (-not ("CodexProxyLauncher.ApplicationActivator" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace CodexProxyLauncher
+{
+    [Flags]
+    internal enum ActivateOptions
+    {
+        None = 0,
+        DesignMode = 1,
+        NoErrorUI = 2,
+        NoSplashScreen = 4
+    }
+
+    [ComImport]
+    [Guid("2E941141-7F97-4756-BA1D-9DECDE894A3D")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IApplicationActivationManager
+    {
+        [PreserveSig]
+        int ActivateApplication(
+            [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+            ActivateOptions options,
+            out uint processId);
+
+        [PreserveSig]
+        int ActivateForFile(IntPtr appUserModelId, IntPtr itemArray, IntPtr verb, out uint processId);
+
+        [PreserveSig]
+        int ActivateForProtocol(IntPtr appUserModelId, IntPtr itemArray, out uint processId);
+    }
+
+    public static class ApplicationActivator
+    {
+        public static uint Activate(string appUserModelId, string arguments)
+        {
+            Type managerType = Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"));
+            object managerObject = Activator.CreateInstance(managerType);
+
+            try
+            {
+                IApplicationActivationManager manager = (IApplicationActivationManager)managerObject;
+                uint processId;
+                int result = manager.ActivateApplication(appUserModelId, arguments, ActivateOptions.None, out processId);
+                Marshal.ThrowExceptionForHR(result);
+                return processId;
+            }
+            finally
+            {
+                if (managerObject != null && Marshal.IsComObject(managerObject))
+                {
+                    Marshal.FinalReleaseComObject(managerObject);
+                }
+            }
+        }
+    }
+}
+'@
+    }
+
+    $activationArguments = ($Arguments | ForEach-Object {
+            ConvertTo-WindowsCommandLineArgument -Argument $_
+        }) -join " "
+    $activatedProcessId = [CodexProxyLauncher.ApplicationActivator]::Activate($AppUserModelId, $activationArguments)
+    return $activatedProcessId
+}
+
 function Start-CodexProcessWithProxy {
     param(
         [string]$FilePath,
@@ -407,6 +564,14 @@ function Start-CodexProcessWithProxy {
     )
 
     $workingDirectory = Split-Path -Parent $FilePath
+    $appUserModelId = Get-AppUserModelIdForExecutable -FilePath $FilePath
+
+    if ($appUserModelId) {
+        Write-Ok "Windows 应用激活 ID：$appUserModelId"
+        $activatedProcessId = Start-PackagedDesktopApp -AppUserModelId $appUserModelId -Arguments $Arguments
+        Write-Ok "已通过 Windows 应用激活 API 启动，pid=$activatedProcessId"
+        return
+    }
 
     try {
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -435,7 +600,7 @@ function Start-CodexProcessWithProxy {
         }
 
         Write-WarnLine "直接启动失败：$message"
-        Write-WarnLine "将使用 ShellExecute 兼容模式启动 WindowsApps 桌面应用。此模式无法注入环境变量，但会保留 --proxy-server 启动参数。"
+        Write-WarnLine "将使用 ShellExecute 兼容模式启动桌面应用。此模式无法注入环境变量，但会保留 --proxy-server 启动参数。"
     }
 
     $shellPsi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -631,6 +796,16 @@ Write-Step "解析 ChatGPT/Codex 启动目标"
 $codexTarget = Resolve-CodexTarget -ExplicitPath $CodexPath -Mode $LaunchMode
 Write-Ok "目标类型：$($codexTarget.DisplayName)"
 Write-Ok "目标路径：$($codexTarget.Path)"
+
+if ($codexTarget.Kind -eq "Desktop") {
+    $resolvedAppUserModelId = Get-AppUserModelIdForExecutable -FilePath $codexTarget.Path
+    if ($resolvedAppUserModelId) {
+        Write-Ok "启动方式：Windows 应用激活 API ($resolvedAppUserModelId)"
+    }
+    else {
+        Write-Ok "启动方式：普通桌面进程"
+    }
+}
 
 if ($VerifyOnly) {
     Write-Step "完成"

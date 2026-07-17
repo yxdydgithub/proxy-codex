@@ -257,9 +257,9 @@ ChatGPT/Codex 桌面程序可能复用已有进程，导致新的代理启动参
 
 #### WindowsApps 中的 `ChatGPT.exe` 启动时报 `Access is denied`
 
-新版 Codex/ChatGPT 可能安装在 `C:\Program Files\WindowsApps` 下。该目录中的桌面入口不一定允许脚本用直接进程启动方式打开。脚本会先尝试注入环境变量启动；如果遇到 `Access is denied`，会自动切换到 ShellExecute 兼容模式，并继续保留 `--proxy-server=http://127.0.0.1:7890` 启动参数。
+新版 Codex/ChatGPT 可能安装在 `C:\Program Files\WindowsApps` 下。MSIX 包会阻止普通进程直接执行包内的 `ChatGPT.exe`，即使使用 ShellExecute 也可能返回 `Access is denied`。
 
-兼容模式无法注入环境变量，但桌面应用仍会收到代理启动参数。
+脚本会自动从 `AppxManifest.xml` 解析应用激活 ID，并通过 Windows 应用激活 API 启动，同时传入 `--proxy-server=http://127.0.0.1:7890`。这条路径不要求管理员权限，不开启系统代理，也不会写入系统或用户环境变量。只有非 MSIX 桌面安装才使用直接进程启动和临时进程环境变量。
 
 #### 代理请求失败
 
