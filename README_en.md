@@ -255,6 +255,12 @@ Or manually specify the executable:
 .\start-codex-with-clash-proxy.ps1 -CodexPath "C:\Program Files\WindowsApps\...\app\ChatGPT.exe"
 ```
 
+#### `ChatGPT.exe` under WindowsApps fails with `Access is denied`
+
+Newer Codex/ChatGPT builds may be installed under `C:\Program Files\WindowsApps`. The desktop entry there may reject direct process startup from the script. The script first tries direct startup with injected environment variables; if it hits `Access is denied`, it automatically falls back to ShellExecute-compatible startup while keeping the `--proxy-server=http://127.0.0.1:7890` launch argument.
+
+In fallback mode, environment variables cannot be injected, but the desktop app still receives the proxy launch argument.
+
 #### Proxy request failed
 
 Check that your Clash Verge node works and that security software is not blocking `verge-mihomo.exe`.

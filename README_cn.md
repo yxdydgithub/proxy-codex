@@ -255,6 +255,12 @@ ChatGPT/Codex 桌面程序可能复用已有进程，导致新的代理启动参
 .\start-codex-with-clash-proxy.ps1 -CodexPath "C:\Program Files\WindowsApps\...\app\ChatGPT.exe"
 ```
 
+#### WindowsApps 中的 `ChatGPT.exe` 启动时报 `Access is denied`
+
+新版 Codex/ChatGPT 可能安装在 `C:\Program Files\WindowsApps` 下。该目录中的桌面入口不一定允许脚本用直接进程启动方式打开。脚本会先尝试注入环境变量启动；如果遇到 `Access is denied`，会自动切换到 ShellExecute 兼容模式，并继续保留 `--proxy-server=http://127.0.0.1:7890` 启动参数。
+
+兼容模式无法注入环境变量，但桌面应用仍会收到代理启动参数。
+
 #### 代理请求失败
 
 检查 Clash Verge 当前节点是否可用，并确认安全软件没有拦截 `verge-mihomo.exe`。

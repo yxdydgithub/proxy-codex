@@ -406,23 +406,47 @@ function Start-CodexProcessWithProxy {
         [string]$NoProxy
     )
 
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $FilePath
-    $psi.WorkingDirectory = Split-Path -Parent $FilePath
-    $psi.UseShellExecute = $false
+    $workingDirectory = Split-Path -Parent $FilePath
 
+    try {
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $FilePath
+        $psi.WorkingDirectory = $workingDirectory
+        $psi.UseShellExecute = $false
+
+        foreach ($argument in $Arguments) {
+            [void]$psi.ArgumentList.Add($argument)
+        }
+
+        foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+            $psi.Environment[$name] = $ProxyUrl
+        }
+        foreach ($name in @("NO_PROXY", "no_proxy")) {
+            $psi.Environment[$name] = $NoProxy
+        }
+
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
+        return
+    }
+    catch {
+        $message = $_.Exception.Message
+        if ($message -notmatch "Access is denied|拒绝访问") {
+            throw
+        }
+
+        Write-WarnLine "直接启动失败：$message"
+        Write-WarnLine "将使用 ShellExecute 兼容模式启动 WindowsApps 桌面应用。此模式无法注入环境变量，但会保留 --proxy-server 启动参数。"
+    }
+
+    $shellPsi = [System.Diagnostics.ProcessStartInfo]::new()
+    $shellPsi.FileName = $FilePath
+    $shellPsi.WorkingDirectory = $workingDirectory
+    $shellPsi.UseShellExecute = $true
     foreach ($argument in $Arguments) {
-        [void]$psi.ArgumentList.Add($argument)
+        [void]$shellPsi.ArgumentList.Add($argument)
     }
 
-    foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
-        $psi.Environment[$name] = $ProxyUrl
-    }
-    foreach ($name in @("NO_PROXY", "no_proxy")) {
-        $psi.Environment[$name] = $NoProxy
-    }
-
-    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    [System.Diagnostics.Process]::Start($shellPsi) | Out-Null
 }
 
 function Invoke-CodexCliWithProxy {
