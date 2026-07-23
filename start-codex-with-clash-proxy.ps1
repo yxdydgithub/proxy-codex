@@ -63,6 +63,107 @@ function Get-UserEnvValue {
     return $value
 }
 
+function Get-CodexStateRoot {
+    $configuredRoot = [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($configuredRoot)) {
+        return [IO.Path]::GetFullPath($configuredRoot)
+    }
+
+    return Join-Path ([Environment]::GetFolderPath("UserProfile")) ".codex"
+}
+
+function Get-CodexDotEnvProxyState {
+    param(
+        [string]$Path,
+        [string]$ProxyUrl,
+        [string]$NoProxy
+    )
+
+    $expected = @{
+        HTTP_PROXY = $ProxyUrl
+        HTTPS_PROXY = $ProxyUrl
+        ALL_PROXY = $ProxyUrl
+        NO_PROXY = $NoProxy
+    }
+    $actual = @{}
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $content = [IO.File]::ReadAllText($Path)
+        $matches = [regex]::Matches(
+            $content,
+            '(?im)^\s*(?:export\s+)?(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY)\s*=\s*(.*?)\s*$'
+        )
+        foreach ($match in $matches) {
+            $value = $match.Groups[2].Value.Trim()
+            if ($value.Length -ge 2 -and (
+                    ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                    ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $actual[$match.Groups[1].Value.ToUpperInvariant()] = $value
+        }
+    }
+
+    $isConfigured = $true
+    foreach ($name in $expected.Keys) {
+        if (-not $actual.ContainsKey($name) -or $actual[$name] -ne $expected[$name]) {
+            $isConfigured = $false
+            break
+        }
+    }
+
+    [PSCustomObject]@{
+        Path = $Path
+        Exists = (Test-Path -LiteralPath $Path -PathType Leaf)
+        IsConfigured = $isConfigured
+    }
+}
+
+function Set-CodexDotEnvProxy {
+    param(
+        [string]$Path,
+        [string]$ProxyUrl,
+        [string]$NoProxy
+    )
+
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+
+    $content = ""
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $content = [IO.File]::ReadAllText($Path)
+    }
+
+    $newLine = if ($content.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $managedBlockPattern = '(?ms)^\s*# BEGIN proxy-codex managed proxy\s*\r?\n.*?^\s*# END proxy-codex managed proxy\s*(?:\r?\n)?'
+    $proxyLinePattern = '(?im)^\s*(?:export\s+)?(?:HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)\s*=.*(?:\r?\n|$)'
+    $content = [regex]::Replace($content, $managedBlockPattern, "")
+    $content = [regex]::Replace($content, $proxyLinePattern, "")
+    $content = $content.TrimEnd("`r", "`n")
+
+    $escapedProxyUrl = $ProxyUrl.Replace("\", "\\").Replace('"', '\"')
+    $escapedNoProxy = $NoProxy.Replace("\", "\\").Replace('"', '\"')
+    $managedLines = @(
+        "# BEGIN proxy-codex managed proxy",
+        "HTTP_PROXY=`"$escapedProxyUrl`"",
+        "HTTPS_PROXY=`"$escapedProxyUrl`"",
+        "ALL_PROXY=`"$escapedProxyUrl`"",
+        "NO_PROXY=`"$escapedNoProxy`"",
+        "# END proxy-codex managed proxy"
+    )
+    $managedBlock = $managedLines -join $newLine
+    $updatedContent = if ($content.Length -gt 0) {
+        $content + $newLine + $newLine + $managedBlock + $newLine
+    }
+    else {
+        $managedBlock + $newLine
+    }
+
+    [IO.File]::WriteAllText($Path, $updatedContent, [Text.UTF8Encoding]::new($false))
+}
+
 function ConvertTo-WinInetProxyState {
     param(
         [string]$Source,
@@ -648,6 +749,8 @@ function Invoke-CodexCliWithProxy {
 
 $proxyUrl = "http://${HostName}:$Port"
 $noProxy = "localhost,127.0.0.1,::1"
+$codexStateRoot = Get-CodexStateRoot
+$codexDotEnvPath = Join-Path $codexStateRoot ".env"
 
 Write-Step "检查权限"
 if (Test-IsAdministrator) {
@@ -669,6 +772,15 @@ foreach ($name in $userProxyNames) {
 }
 if (-not $foundUserProxy) {
     Write-Ok "未发现用户级代理环境变量"
+}
+
+Write-Step "检查 Codex 专用代理配置"
+$codexDotEnvState = Get-CodexDotEnvProxyState -Path $codexDotEnvPath -ProxyUrl $proxyUrl -NoProxy $noProxy
+if ($codexDotEnvState.IsConfigured) {
+    Write-Ok "$codexDotEnvPath 已配置 $proxyUrl"
+}
+else {
+    Write-WarnLine "$codexDotEnvPath 尚未配置当前代理。启动桌面应用时脚本会自动写入。"
 }
 
 Write-Step "检查本地代理端口"
@@ -818,7 +930,14 @@ if ($runningCodex.Count -gt 0 -and -not $RestartCodex) {
     Write-WarnLine "检测到 ChatGPT/Codex 已在运行。请先关闭应用，或使用 -RestartCodex，避免旧进程忽略新的代理参数。"
     exit 2
 }
-elseif ($RestartCodex) {
+
+if ($codexTarget.Kind -eq "Desktop") {
+    Write-Step "配置 Codex app-server 专用代理"
+    Set-CodexDotEnvProxy -Path $codexDotEnvPath -ProxyUrl $proxyUrl -NoProxy $noProxy
+    Write-Ok "已更新 $codexDotEnvPath；该配置只由 Codex 读取"
+}
+
+if ($RestartCodex) {
     Stop-ExistingCodex
 }
 
@@ -831,7 +950,7 @@ if ($codexTarget.Kind -eq "Desktop") {
 
     Write-Ok "启动参数：$($arguments -join ' ')"
     Start-CodexProcessWithProxy -FilePath $codexTarget.Path -Arguments $arguments -ProxyUrl $proxyUrl -NoProxy $noProxy
-    Write-Ok "已启动 ChatGPT/Codex 桌面应用。代理只通过启动参数和临时进程环境传递，不写入系统或用户环境。"
+    Write-Ok "已启动 ChatGPT/Codex 桌面应用。Chromium 使用启动参数，Codex app-server 使用 $codexDotEnvPath；不会写入 Windows 用户或系统代理。"
 }
 else {
     Write-Ok "CLI 参数：$($CodexArguments -join ' ')"

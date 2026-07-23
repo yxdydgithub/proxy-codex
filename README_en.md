@@ -19,6 +19,8 @@ Official sources:
 - ChatGPT desktop app docs: <https://developers.openai.com/codex/app>
 - Codex on Windows docs: <https://developers.openai.com/codex/windows>
 - Codex CLI docs: <https://developers.openai.com/codex/cli>
+- Codex environment variables: <https://learn.chatgpt.com/docs/config-file/environment-variables>
+- Codex `.env` loader source: <https://github.com/openai/codex/blob/main/codex-rs/arg0/src/lib.rs>
 
 ### Use Case
 
@@ -38,7 +40,7 @@ Use this when:
 
 Desktop mode does two things:
 
-1. Injects temporary proxy environment variables only into the Codex child process:
+1. Writes the proxy to Codex's private `~/.codex/.env` file for the newer `codex.exe app-server`, model requests, and WebSocket clients:
 
 ```text
 HTTP_PROXY=http://127.0.0.1:7890
@@ -56,7 +58,7 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 CLI mode does not pass Chromium / Electron arguments. Instead, it temporarily sets the proxy environment variables in the current PowerShell process, runs `codex`, and restores the previous process environment after the CLI exits.
 
-The script uses `.NET ProcessStartInfo` to inject proxy variables directly into the desktop app child process. It does not modify the current PowerShell process, Windows system proxy, WinHTTP proxy, or user-level environment variables.
+`~/.codex/.env` is loaded only by Codex. It is not a Windows user-level environment file and does not make other applications use the proxy. The script preserves unrelated settings in the file and updates only the proxy block managed by `proxy-codex`. It does not change the system proxy or WinHTTP proxy.
 
 ### Clash Verge Requirements
 
@@ -71,7 +73,7 @@ In Clash Verge, make sure:
 
 | File | Purpose |
 | --- | --- |
-| `start-codex-with-clash-proxy.ps1` | Starts ChatGPT/Codex with proxy settings applied only to this process. |
+| `start-codex-with-clash-proxy.ps1` | Starts ChatGPT/Codex and maintains its Codex-only proxy configuration. |
 | `clear-user-proxy-env.ps1` | Removes user-level proxy environment variables left by older approaches. |
 | `create-codex-proxy-shortcut.ps1` | Creates a desktop shortcut for launching Codex through the script. |
 | `README.md` | Documentation. |
@@ -259,7 +261,17 @@ Or manually specify the executable:
 
 Newer Codex/ChatGPT builds may be installed under `C:\Program Files\WindowsApps`. The MSIX package can reject direct execution of its packaged `ChatGPT.exe`, and ShellExecute may fail with the same `Access is denied` error.
 
-The script now resolves the application activation ID from `AppxManifest.xml` and launches it through the Windows application activation API while passing `--proxy-server=http://127.0.0.1:7890`. This path does not require administrator rights, enable the system proxy, or write system/user environment variables. Direct process startup with temporary process environment variables is retained for non-MSIX desktop installations only.
+The script resolves the application activation ID from `AppxManifest.xml` and launches it through the Windows application activation API while passing `--proxy-server=http://127.0.0.1:7890`. This path does not require administrator rights or the system proxy.
+
+#### Reconnecting repeatedly after an update
+
+Newer desktop builds perform most network requests in a separate `codex.exe app-server` child process. Passing `--proxy-server` only to the ChatGPT/Chromium main process does not automatically configure app-server, which can cause repeated streaming reconnects, `Failed to send request`, or request timeouts.
+
+The current script updates `~/.codex/.env` before restarting the app so both Chromium and app-server use the same proxy. Run the shortcut or execute:
+
+```powershell
+.\start-codex-with-clash-proxy.ps1 -RestartCodex
+```
 
 #### Proxy request failed
 
